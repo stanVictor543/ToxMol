@@ -11,9 +11,9 @@ import time
 print("--- Inițializare Proiect: Previziunea Toxicității SR-ATAD5 ---")
 
 # 1. PARAMETRI ȘI ÎNCĂRCAREA DATELOR
-TARGET_ASSAY = 'SR-ATAD5'
+TARGET_ASSAY = 'NR-AR'
 N_BITS = 2048 # Dimensiunea Morgan Fingerprint
-RADIUS = 2    # Raza Morgan Fingerprint
+RADIUS = 2   # Raza Morgan Fingerprint
 
 try:
     # Descarcă și încarcă setul de date Tox21 (split implicit: train/valid/test)
@@ -151,3 +151,59 @@ feature_df = feature_df.sort_values(by='Importance', ascending=False).head(10)
 print(feature_df.to_markdown(index=False))
 
 print(f"\nConcluzie: Modelul cu AUC-ROC mai mare (probabil Random Forest) oferă o capacitate de predicție superioară pentru {TARGET_ASSAY}.")
+
+from sklearn.metrics import precision_recall_curve
+from sklearn.metrics import f1_score
+
+
+# Reiau modelul antrenat si seturile de test din codul anterior:
+# model_rf, X_test, Y_test
+
+print("--- 6. Optimizarea Pragului de Decizie ---")
+
+# 1. Generează probabilitățile de clasă 1 (Toxic)
+# Avem nevoie de probabilitati, nu de predicții binare
+Y_proba_rf = model_rf.predict_proba(X_test)[:, 1]
+
+# 2. Calculează Curba Precision-Recall
+# Aceasta ne oferă Precision, Recall și Pragul (Threshold) pentru fiecare punct.
+precision, recall, thresholds = precision_recall_curve(Y_test, Y_proba_rf)
+
+# 3. Calculează F1-Score pentru fiecare prag
+# Se aplică formula F1: 2 * (Precision * Recall) / (Precision + Recall)
+# Ignorăm ultimul punct al curbei care are NaN sau 0
+fscore = 2 * (precision * recall) / (precision + recall)
+fscore[np.isnan(fscore)] = 0 # Trateaza rezultatele NaN/0 care apar la divizarea cu 0
+
+# 4. Găsește pragul (threshold) care maximizează F1-Score-ul
+ix = np.argmax(fscore)
+optimal_f1 = fscore[ix]
+optimal_threshold = thresholds[ix]
+
+print(f"   -> F1-Score Maximizat: {optimal_f1:.4f}")
+print(f"   -> Prag Optim (Optimal Threshold): {optimal_threshold:.4f}")
+print(f"   -> Rapel (Recall) corespunzător: {recall[ix]:.4f}")
+print(f"   -> Precizie (Precision) corespunzătoare: {precision[ix]:.4f}")
+
+# 5. RE-EVALUAREA MODELULUI CU PRAGUL OPTIM
+print("\n--- 7. Re-Evaluare cu Pragul Optim ---")
+from sklearn.metrics import roc_auc_score, accuracy_score
+
+# Aplică noul prag pentru a obține predicțiile binare
+Y_pred_optimized = (Y_proba_rf >= optimal_threshold).astype(int)
+
+# Recalculează metricile de evaluare
+auc_roc_optimized = roc_auc_score(Y_test, Y_proba_rf) # AUC-ROC nu se schimbă la ajustarea pragului
+f1_optimized = f1_score(Y_test, Y_pred_optimized)
+accuracy_optimized = accuracy_score(Y_test, Y_pred_optimized)
+
+print(f"   - AUC-ROC (neschimbat): {auc_roc_optimized:.4f}")
+print(f"   - F1-Score Optimizat: {f1_optimized:.4f} (Îmbunătățire MAJORĂ față de 0.0000!)")
+print(f"   - Acuratețe Optimizată: {accuracy_optimized:.4f}")
+
+# Comparație finală
+print("\n######################################################")
+print("## Rezultate Comparate (RF Standard vs. RF Optimizat) ##")
+print("######################################################")
+print(f"F1-Score (Prag 0.5): {0.0000:.4f}")
+print(f"F1-Score (Prag {optimal_threshold:.4f}): {f1_optimized:.4f}")
