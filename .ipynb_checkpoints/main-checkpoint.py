@@ -5,8 +5,6 @@ from rdkit import Chem
 from rdkit.Chem.AllChem import GetMorganFingerprintAsBitVect
 from sklearn.naive_bayes import GaussianNB
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.naive_bayes import BernoulliNB
-from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
 import time
 
@@ -107,25 +105,15 @@ def evaluate_model(model, X_test, Y_test, model_name):
 
 # 4. MODELARE ȘI ANTRENAMENT
 
-print("\n4.1 Antrenare Model 1 (Optimizat): Bernoulli Naive Bayes...")
+# MODEL 1: Clasificatorul Bayesian Naiv (GaussianNB)
+print("\n4.1 Antrenare Model 1: Clasificator Bayesian Naiv...")
+start_time_bayes = time.time()
+model_bayes = GaussianNB()
+model_bayes.fit(X_train, Y_train)
+time_bayes = time.time() - start_time_bayes
+print(f"   -> Timp antrenament: {time_bayes:.2f} secunde")
+auc_bayes, f1_bayes = evaluate_model(model_bayes, X_test, Y_test, "Bayesian Naiv")
 
-# 1. Define the model (Bernoulli is better for Bit Vectors)
-nb = BernoulliNB()
-
-# 2. Define parameters to test (Fine-tuning)
-# 'alpha' controls smoothing. Lower = less smoothing, Higher = more smoothing.
-param_grid = {'alpha': [0.01, 0.1, 0.5, 1.0, 5.0, 10.0]}
-
-# 3. Use GridSearch to find the best parameter
-grid_search = GridSearchCV(nb, param_grid, cv=5, scoring='roc_auc', n_jobs=-1)
-grid_search.fit(X_train, Y_train)
-
-# 4. Get the best model
-best_nb = grid_search.best_estimator_
-print(f"   -> Cel mai bun parametru alpha: {grid_search.best_params_['alpha']}")
-
-# 5. Evaluate
-auc_bayes, f1_bayes = evaluate_model(best_nb, X_test, Y_test, "BernoulliNB Optimizat")
 
 # MODEL 2: Păduri Aleatoare (Random Forest)
 print("\n4.2 Antrenare Model 2: Păduri Aleatoare (Random Forest)...")
@@ -147,7 +135,7 @@ results = {
     'Algoritm': ['Bayesian Naiv', 'Random Forest'],
     'AUC-ROC': [auc_bayes, auc_rf],
     'F1-Score': [f1_bayes, f1_rf],
-    #'Timp Antrenament (s)': [time_bayes, time_rf]
+    'Timp Antrenament (s)': [time_bayes, time_rf]
 }
 df_results = pd.DataFrame(results)
 print(df_results.sort_values(by='AUC-ROC', ascending=False).to_markdown(index=False))
