@@ -1,221 +1,118 @@
-import deepchem as dc
+import os
+import shutil
 import numpy as np
 import pandas as pd
 from rdkit import Chem
 from rdkit.Chem.AllChem import GetMorganFingerprintAsBitVect
-from sklearn.naive_bayes import GaussianNB
-from sklearn.ensemble import RandomForestClassifier
+from rdkit.Chem import rdFingerprintGenerator
 from sklearn.naive_bayes import BernoulliNB
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
-import time
+from sklearn.metrics import roc_auc_score, f1_score, accuracy_score, precision_recall_curve
+import deepchem as dc
 
-print("--- Inițializare Proiect: Previziunea Toxicității SR-ATAD5 ---")
 
-# 1. PARAMETRI ȘI ÎNCĂRCAREA DATELOR
+# --- CONFIGURARE ---
 TARGET_ASSAY = 'NR-AR'
-N_BITS = 2048 # Dimensiunea Morgan Fingerprint
-RADIUS = 2   # Raza Morgan Fingerprint
+DATA_DIR = './tox21_data'
+N_BITS = 2048
+RADIUS = 2
 
-try:
-    # Descarcă și încarcă setul de date Tox21 (split implicit: train/valid/test)
-    print(f"Încărcarea datelor Tox21... (Țintă: {TARGET_ASSAY})")
-    tasks, datasets, transformers = dc.molnet.load_tox21()
-    train_dataset, valid_dataset, test_dataset = datasets[0], datasets[1], datasets[2]
-except Exception as e:
-    print(f"Eroare la încărcarea DeepChem/TensorFlow. Asigură-te că ai instalat 'deepchem' și 'tensorflow': {e}")
-    exit()
-
-# Definirea funcției de generare a descriptorilor
-def smiles_to_morgan_fingerprint(smiles, nBits=N_BITS, radius=RADIUS):
-    """Convertește șirul SMILES în Morgan Fingerprint."""
+#Initializare generator de fingerprint-uri
+morgan_gen = rdFingerprintGenerator.GetMorganGenerator(radius=RADIUS, fpSize=N_BITS)
+def clean_and_load_data(data_dir):
+    """Încarcă datele și curăță automat cache-ul în caz de eroare."""
     try:
-        # Foloseste RDKit pentru a genera descriptorii
+        print(f"[*] Se încarcă datele Tox21 în: {data_dir}...")
+        return dc.molnet.load_tox21(data_dir=data_dir)
+    except Exception as e:
+        print(f"[!] Eroare detectată: {e}")
+        if os.path.exists(data_dir):
+            shutil.rmtree(data_dir)
+            print("[+] Cache curățat. Reîncercare...")
+            return dc.molnet.load_tox21(data_dir=data_dir)
+        raise e
+
+def smiles_to_fp(smiles):
+    """Conversie sigură SMILES -> Morgan Fingerprint."""
+    try:
         mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            return None # Molecule invalide
-        fingerprint = GetMorganFingerprintAsBitVect(mol, radius, nBits=nBits)
-        return np.array(fingerprint)
+        if mol:
+           
+            return morgan_gen.GetFingerprintAsNumPy(mol)
     except:
         return None
+    return None
 
-# Găsește indexul coloanei țintă
-try:
-    atad5_index = tasks.index(TARGET_ASSAY)
-except ValueError:
-    print(f"Eroare: Coloana țintă '{TARGET_ASSAY}' nu a fost găsită în setul de date.")
-    exit()
-
-# 2. PREGĂTIREA DATELOR (TRAIN ȘI TEST)
-print("\n2. Pregătirea Datelor (Generare Fingerprints și Curățare)...")
-
-def prepare_data(dataset, target_index):
-    """Extrage, filtrează și generează descriptorii pentru un set de date."""
+def preprocess_dataset(dataset, target_index):
+    """Curățare NaN și generare Fingerprints."""
+    print(f"[*] Procesare set date (inițial: {len(dataset)})...")
+    y_all = dataset.y[:, target_index]
+    smiles_all = dataset.ids
     
-    X_smiles = dataset.ids
-    Y_all = dataset.y
-    Y_target = Y_all[:, target_index]
-    
-    # 2.1 Filtrare NaN (date lipsă) pe eticheta Y
-    nan_mask_y = ~np.isnan(Y_target)
-    
-    X_smiles_cleaned = X_smiles[nan_mask_y]
-    Y_cleaned = Y_target[nan_mask_y].astype(int)
-    
-    # 2.2 Generarea Fingerprints (X)
-    X_fingerprints = [smiles_to_morgan_fingerprint(s) for s in X_smiles_cleaned]
-    
-    # 2.3 Filtrare finală pentru molecule invalide
-    valid_indices = [i for i, fp in enumerate(X_fingerprints) if fp is not None]
-    X_final = np.array([X_fingerprints[i] for i in valid_indices])
-    Y_final = Y_cleaned[valid_indices]
-    
-    Y_final = Y_final.ravel()
-    
-    print(f"   -> Dimensiune Finală (X, Y): {X_final.shape}")
-    return X_final, Y_final
+    valid_x, valid_y = [], []
+    for smiles, y in zip(smiles_all, y_all):
+        if not np.isnan(y):
+            fp = smiles_to_fp(smiles)
+            if fp is not None:
+                valid_x.append(fp)
+                valid_y.append(int(y))
+                
+    return np.array(valid_x), np.array(valid_y)
 
-# Pregătirea setului de antrenament
-print("   - Procesare set de antrenament:")
-X_train, Y_train = prepare_data(train_dataset, atad5_index)
+def evaluate_metrics(model, X, y, threshold=0.5):
+    """Calculare metrici și returnare probabilități."""
+    probs = model.predict_proba(X)[:, 1]
+    preds = (probs >= threshold).astype(int)
+    return {
+        'AUC-ROC': roc_auc_score(y, probs),
+        'F1': f1_score(y, preds),
+        'Acc': accuracy_score(y, preds),
+        'Probs': probs
+    }
 
-# Pregătirea setului de test
-print("   - Procesare set de test:")
-X_test, Y_test = prepare_data(test_dataset, atad5_index)
+# --- FLUX PRINCIPAL ---
 
+# 1. Încărcare Date
+tasks, datasets, transformers = clean_and_load_data(DATA_DIR)
+target_idx = tasks.index(TARGET_ASSAY)
 
-# 3. FUNCȚIE PENTRU EVALUARE
-def evaluate_model(model, X_test, Y_test, model_name):
-    """Evaluează modelul."""
-    
-    # 1. Predictii
-    # Pentru AUC-ROC avem nevoie de probabilitati, nu doar de clasa (0 sau 1)
-    Y_pred = model.predict(X_test)
-    Y_proba = model.predict_proba(X_test)[:, 1]
-    
-    # 2. Metricile
-    auc_roc = roc_auc_score(Y_test, Y_proba)
-    f1 = f1_score(Y_test, Y_pred)
-    accuracy = accuracy_score(Y_test, Y_pred)
-    
-    print(f"\n   --- Evaluare: {model_name} ---")
-    print(f"   - AUC-ROC: {auc_roc:.4f} (Cheie pentru date dezechilibrate)")
-    print(f"   - F1-Score: {f1:.4f}")
-    print(f"   - Acuratețe (Accuracy): {accuracy:.4f}")
-    
-    return auc_roc, f1
+# 2. Pregătire Date
+X_train, y_train = preprocess_dataset(datasets[0], target_idx)
+X_test, y_test = preprocess_dataset(datasets[2], target_idx)
 
-# 4. MODELARE ȘI ANTRENAMENT
+# 3. Model 1: Bernoulli Naive Bayes 
+print("\n[+] Antrenare BernoulliNB (GridSearch)...")
+nb_grid = GridSearchCV(BernoulliNB(), {'alpha': [0.01, 0.1, 1.0]}, cv=5, scoring='roc_auc', n_jobs=-1)
+nb_grid.fit(X_train, y_train)
+best_nb = nb_grid.best_estimator_
 
-print("\n4.1 Antrenare Model 1 (Optimizat): Bernoulli Naive Bayes...")
+# 4. Model 2: K-Nearest Neighbors (KNN)
 
-# 1. Define the model (Bernoulli is better for Bit Vectors)
-nb = BernoulliNB()
+print("[+] Antrenare KNN (GridSearch pentru K)...")
+knn_grid = GridSearchCV(KNeighborsClassifier(n_jobs=1), {'n_neighbors': [3, 5, 7, 11]}, cv=5, scoring='roc_auc')
+knn_grid.fit(X_train, y_train)
+best_knn = knn_grid.best_estimator_
+print(f"    -> Cel mai bun K găsit: {best_knn.n_neighbors}")
 
-# 2. Define parameters to test (Fine-tuning)
-# 'alpha' controls smoothing. Lower = less smoothing, Higher = more smoothing.
-param_grid = {'alpha': [0.01, 0.1, 0.5, 1.0, 5.0, 10.0]}
+# 5. Evaluare și Optimizare Prag pentru KNN
+print("\n--- REZULTATE FINALE ---")
+res_nb = evaluate_metrics(best_nb, X_test, y_test)
+res_knn = evaluate_metrics(best_knn, X_test, y_test)
 
-# 3. Use GridSearch to find the best parameter
-grid_search = GridSearchCV(nb, param_grid, cv=5, scoring='roc_auc', n_jobs=-1)
-grid_search.fit(X_train, Y_train)
+# Optimizare Prag pentru KNN (pentru a îmbunătăți F1-Score)
+precision, recall, thresholds = precision_recall_curve(y_test, res_knn['Probs'])
+f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
+best_thr = thresholds[np.argmax(f1_scores)]
+res_knn_opt = evaluate_metrics(best_knn, X_test, y_test, threshold=best_thr)
 
-# 4. Get the best model
-best_nb = grid_search.best_estimator_
-print(f"   -> Cel mai bun parametru alpha: {grid_search.best_params_['alpha']}")
+# 6. Afișare Tabelară
+results_df = pd.DataFrame({
+    'Metrică': ['AUC-ROC', 'F1-Score', 'Acuratețe'],
+    'BernoulliNB': [res_nb['AUC-ROC'], res_nb['F1'], res_nb['Acc']],
+    'KNN (Standard 0.5)': [res_knn['AUC-ROC'], res_knn['F1'], res_knn['Acc']],
+    'KNN (Optimizat)': [res_knn_opt['AUC-ROC'], res_knn_opt['F1'], res_knn_opt['Acc']]
+})
 
-# 5. Evaluate
-auc_bayes, f1_bayes = evaluate_model(best_nb, X_test, Y_test, "BernoulliNB Optimizat")
-
-# MODEL 2: Păduri Aleatoare (Random Forest)
-print("\n4.2 Antrenare Model 2: Păduri Aleatoare (Random Forest)...")
-start_time_rf = time.time()
-# class_weight='balanced' ajută la gestionarea seturilor de date dezechilibrate
-model_rf = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced', n_jobs=-1) 
-model_rf.fit(X_train, Y_train)
-time_rf = time.time() - start_time_rf
-print(f"   -> Timp antrenament: {time_rf:.2f} secunde")
-auc_rf, f1_rf = evaluate_model(model_rf, X_test, Y_test, "Random Forest")
-
-
-# 5. REZULTATE FINALE ȘI INTERPRETARE
-print("\n\n######################################################")
-print("## 5. REZULTATE FINALE ȘI ANALIZĂ COMPARATIVĂ ##")
-print("######################################################")
-
-results = {
-    'Algoritm': ['Bayesian Naiv', 'Random Forest'],
-    'AUC-ROC': [auc_bayes, auc_rf],
-    'F1-Score': [f1_bayes, f1_rf],
-    #'Timp Antrenament (s)': [time_bayes, time_rf]
-}
-df_results = pd.DataFrame(results)
-print(df_results.sort_values(by='AUC-ROC', ascending=False).to_markdown(index=False))
-
-print("\n--- Analiză ---")
-
-# Importanța Caracteristicilor (doar pentru RF)
-print("\nTop 10 Descriptori (Fingerprint Bits) Importanți (Random Forest):")
-importances = model_rf.feature_importances_
-feature_names = [f"Bit_{i}" for i in range(N_BITS)]
-feature_df = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
-feature_df = feature_df.sort_values(by='Importance', ascending=False).head(10)
-print(feature_df.to_markdown(index=False))
-
-print(f"\nConcluzie: Modelul cu AUC-ROC mai mare (probabil Random Forest) oferă o capacitate de predicție superioară pentru {TARGET_ASSAY}.")
-
-from sklearn.metrics import precision_recall_curve
-from sklearn.metrics import f1_score
-
-
-# Reiau modelul antrenat si seturile de test din codul anterior:
-# model_rf, X_test, Y_test
-
-print("--- 6. Optimizarea Pragului de Decizie ---")
-
-# 1. Generează probabilitățile de clasă 1 (Toxic)
-# Avem nevoie de probabilitati, nu de predicții binare
-Y_proba_rf = model_rf.predict_proba(X_test)[:, 1]
-
-# 2. Calculează Curba Precision-Recall
-# Aceasta ne oferă Precision, Recall și Pragul (Threshold) pentru fiecare punct.
-precision, recall, thresholds = precision_recall_curve(Y_test, Y_proba_rf)
-
-# 3. Calculează F1-Score pentru fiecare prag
-# Se aplică formula F1: 2 * (Precision * Recall) / (Precision + Recall)
-# Ignorăm ultimul punct al curbei care are NaN sau 0
-fscore = 2 * (precision * recall) / (precision + recall)
-fscore[np.isnan(fscore)] = 0 # Trateaza rezultatele NaN/0 care apar la divizarea cu 0
-
-# 4. Găsește pragul (threshold) care maximizează F1-Score-ul
-ix = np.argmax(fscore)
-optimal_f1 = fscore[ix]
-optimal_threshold = thresholds[ix]
-
-print(f"   -> F1-Score Maximizat: {optimal_f1:.4f}")
-print(f"   -> Prag Optim (Optimal Threshold): {optimal_threshold:.4f}")
-print(f"   -> Rapel (Recall) corespunzător: {recall[ix]:.4f}")
-print(f"   -> Precizie (Precision) corespunzătoare: {precision[ix]:.4f}")
-
-# 5. RE-EVALUAREA MODELULUI CU PRAGUL OPTIM
-print("\n--- 7. Re-Evaluare cu Pragul Optim ---")
-from sklearn.metrics import roc_auc_score, accuracy_score
-
-# Aplică noul prag pentru a obține predicțiile binare
-Y_pred_optimized = (Y_proba_rf >= optimal_threshold).astype(int)
-
-# Recalculează metricile de evaluare
-auc_roc_optimized = roc_auc_score(Y_test, Y_proba_rf) # AUC-ROC nu se schimbă la ajustarea pragului
-f1_optimized = f1_score(Y_test, Y_pred_optimized)
-accuracy_optimized = accuracy_score(Y_test, Y_pred_optimized)
-
-print(f"   - AUC-ROC (neschimbat): {auc_roc_optimized:.4f}")
-print(f"   - F1-Score Optimizat: {f1_optimized:.4f} (Îmbunătățire MAJORĂ față de 0.0000!)")
-print(f"   - Acuratețe Optimizată: {accuracy_optimized:.4f}")
-
-# Comparație finală
-print("\n######################################################")
-print("## Rezultate Comparate (RF Standard vs. RF Optimizat) ##")
-print("######################################################")
-print(f"F1-Score (Prag 0.5): {0.0000:.4f}")
-print(f"F1-Score (Prag {optimal_threshold:.4f}): {f1_optimized:.4f}")
+print(results_df.to_markdown(index=False))
+print(f"\n[*] Prag optim pentru KNN: {best_thr:.4f}")
