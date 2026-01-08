@@ -95,7 +95,7 @@ knn_grid.fit(X_train, y_train)
 best_knn = knn_grid.best_estimator_
 print(f"    -> Cel mai bun K găsit: {best_knn.n_neighbors}")
 
-# 5. Evaluare și Optimizare Prag pentru KNN
+# 5. Evaluare modele
 print("\n--- REZULTATE FINALE ---")
 res_nb = evaluate_metrics(best_nb, X_test, y_test)
 res_knn = evaluate_metrics(best_knn, X_test, y_test)
